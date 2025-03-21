@@ -109,6 +109,8 @@ class UnifiedIBCTransfer extends BaseTransfer {
       );
       
       if (!channel) {
+        this.logger.error(`No channel found between ${this.sourceChainName} and ${this.destinationChainName}`);
+        this.logger.info(`Consider using UNION as an intermediary for ${this.sourceChainName} -> UNION -> ${this.destinationChainName}`);
         throw new Error('No channel found between source and destination chains');
       }
       

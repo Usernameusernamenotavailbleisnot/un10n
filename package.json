@@ -1,7 +1,7 @@
 {
-  "name": "un10n-quest-bot",
+  "name": "union-quest-bot",
   "version": "1.0.0",
-  "description": "Bot for automating un10n, Babylon, Stride and Stargaze transfers and quests",
+  "description": "Bot for automating Union, Babylon, Stride and Stargaze transfers and quests",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "test-transfer": "node test-transfer.js"
   },
   "keywords": [
-    "un10n",
+    "union",
     "babylon",
     "stride",
     "stargaze",
@@ -18,7 +18,7 @@
     "quest"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "ISC",
   "dependencies": {
     "@cosmjs/proto-signing": "^0.33.0",
     "@cosmjs/stargate": "^0.33.0",

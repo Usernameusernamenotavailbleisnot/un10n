@@ -204,6 +204,19 @@ class TransferQuestService {
    * @returns {string} Source chain name
    */
   getSuitableSourceChain(destChain, progressData) {
+    // Special routing rules based on destination
+    if (destChain === 'UNION') {
+      // For transfers to UNION, prefer using STARGAZE as source
+      if (progressData.addresses['STARGAZE']) {
+        return 'STARGAZE';
+      }
+    } else if (destChain === 'BABYLON') {
+      // For transfers to BABYLON, prefer using UNION as source
+      if (progressData.addresses['UNION']) {
+        return 'UNION';
+      }
+    }
+    
     // Available chains besides the destination
     const availableChains = Object.keys(this.config.chains).filter(chain => 
       chain !== destChain && progressData.addresses[chain]
@@ -213,11 +226,13 @@ class TransferQuestService {
       throw new Error(`No suitable source chain found for transfers to ${destChain}`);
     }
     
-    // Prefer STARGAZE or STRIDE for source if available
+    // General preferences for source chains
     if (availableChains.includes('STARGAZE')) {
       return 'STARGAZE';
     } else if (availableChains.includes('STRIDE')) {
       return 'STRIDE';
+    } else if (availableChains.includes('UNION')) {
+      return 'UNION';
     }
     
     // Otherwise just use the first available chain
