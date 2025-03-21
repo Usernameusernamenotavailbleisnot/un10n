@@ -1,0 +1,38 @@
+{
+    "name": "union-quest-bot",
+    "version": "1.0.0",
+    "description": "Bot for automating Union, Babylon, Stride and Stargaze transfers and quests",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+      "start": "node index.js",
+      "test-transfer": "node test-transfer.js"
+    },
+    "keywords": [
+      "union",
+      "babylon",
+      "stride",
+      "stargaze",
+      "cosmos",
+      "transfer",
+      "quest"
+    ],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+      "@cosmjs/proto-signing": "^0.33.0",
+      "@cosmjs/stargate": "^0.33.0",
+      "@scure/base": "^1.1.3",
+      "@unionlabs/client": "",
+      "boxen": "^7.1.0",
+      "chalk": "^5.2.0",
+      "clear": "^0.1.0",
+      "cosmjs-types": "^0.9.0",
+      "dotenv": "^16.3.1",
+      "figlet": "^1.6.0",
+      "inquirer": "^9.2.7",
+      "ora": "^6.3.1",
+      "viem": "^1.21.4",
+      "winston": "^3.11.0"
+    }
+  }
