@@ -1,10 +1,10 @@
+// core/quests/crossChainQuest.js
 import { createWalletLogger } from '../../utils/logger.js';
 import ProgressService from '../progress/progress.js';
-import TransferFactory from '../blockchain/transfers/transferFactory.js';
-import { sleep } from '../../utils/common.js';
+import workerManager from '../workers/workerManager.js';
 
 /**
- * Service for handling cross-chain quests
+ * Service for handling cross-chain quests with multi-threading support
  */
 class CrossChainQuestService {
   /**
@@ -17,28 +17,49 @@ class CrossChainQuestService {
   }
 
   /**
-   * Run cross-chain quests for all wallets
+   * Run cross-chain quests for all wallets with multi-threading
    * @param {string[]} privateKeys - Array of private keys
    * @param {Object} options - Cross-chain options
+   * @param {number} maxThreads - Maximum number of concurrent threads
    * @returns {Promise<void>}
    */
-  async runForAll(privateKeys, options) {
-    this.logger.info(`Running cross-chain quests for ${privateKeys.length} wallets`);
+  async runForAll(privateKeys, options, maxThreads = 3) {
+    this.logger.info(`Running cross-chain quests for ${privateKeys.length} wallets with max ${maxThreads} threads`);
+    
+    // Create tasks for wallets where each wallet is a separate task
+    const walletTasks = [];
     
     for (let i = 0; i < privateKeys.length; i++) {
-      try {
-        await this.run(privateKeys[i], i, options);
-        
-        // Add a small delay between wallets
-        if (i < privateKeys.length - 1) {
-          this.logger.info('Waiting 2 seconds before processing next wallet...');
-          await sleep(2000);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to process wallet ${i+1}: ${error.message}`);
-        // Continue with next wallet
-      }
+      walletTasks.push({
+        privateKey: privateKeys[i],
+        walletIndex: i
+      });
     }
+    
+    // Process wallets in parallel based on maxThreads
+    // We'll use our own batching here to ensure correct threading
+    const batchSize = Math.min(maxThreads, walletTasks.length);
+    let processedCount = 0;
+    
+    while (processedCount < walletTasks.length) {
+      const batch = [];
+      const currentBatchSize = Math.min(batchSize, walletTasks.length - processedCount);
+      
+      this.logger.info(`Processing wallet batch ${processedCount+1}-${processedCount+currentBatchSize} of ${walletTasks.length}`);
+      
+      // Start tasks in this batch concurrently
+      for (let i = 0; i < currentBatchSize; i++) {
+        const task = walletTasks[processedCount + i];
+        batch.push(this.run(task.privateKey, task.walletIndex, options));
+      }
+      
+      // Wait for all wallets in this batch to complete
+      await Promise.all(batch);
+      
+      processedCount += currentBatchSize;
+    }
+    
+    this.logger.info(`Completed cross-chain quests for all ${walletTasks.length} wallets`);
   }
 
   /**
@@ -53,8 +74,6 @@ class CrossChainQuestService {
     logger.info('Starting cross-chain quest processing');
     
     const progressService = new ProgressService(walletIndex);
-    
-    // Read progress data
     const progressData = await progressService.readProgressData();
     
     try {
@@ -84,12 +103,14 @@ class CrossChainQuestService {
           
           if (!success) {
             allSuccess = false;
-            break;
+            // Note: We continue even if a quest fails due to the updated requirement
           }
         }
         
         if (allSuccess) {
           logger.info('Successfully processed all cross-chain quests');
+        } else {
+          logger.warn('Some cross-chain quests failed, but processing continued');
         }
       } else if (quest) {
         // Execute single specified quest
@@ -145,51 +166,39 @@ class CrossChainQuestService {
       logger.info(`Processing cross-chain path: ${path.join(' → ')}`);
       
       let allSuccess = true;
-      const transferFactory = new TransferFactory(this.config, walletIndex, privateKey);
+      const failedSteps = [];
       
-      // Execute each transfer in the path
+      // Process each step in the path SEQUENTIALLY
       for (let i = 0; i < path.length - 1; i++) {
-        try {
-          // Get the source and destination chains
-          const sourceChain = path[i];
-          const destinationChain = path[i + 1];
-          
-          logger.info(`Processing transfer ${i+1}/${path.length-1}: ${sourceChain} → ${destinationChain}`);
-          
-          // Get destination address
-          const destinationAddress = progressData.addresses[destinationChain];
-          
-          if (!destinationAddress) {
-            logger.error(`Missing address for ${destinationChain}`);
-            allSuccess = false;
-            break;
-          }
-          
-          // Execute the transfer
-          const transferType = `${sourceChain}_TO_${destinationChain}`;
-          const transfer = transferFactory.createTransfer(transferType);
-          
-          const result = await transfer.transfer(destinationAddress, transferAmount);
-          
-          if (!result || !result.success) {
-            allSuccess = false;
-            logger.error(`Failed at transfer ${i+1}: ${sourceChain} → ${destinationChain}`);
-            break;
-          }
-          
-          // Wait before the next transfer
-          if (i < path.length - 2) {
-            logger.info('Waiting for 5 seconds before next transfer...');
-            await sleep(5000);
-          }
-          
-        } catch (error) {
+        // Get the source and destination chains
+        const sourceChain = path[i];
+        const destinationChain = path[i + 1];
+        
+        logger.info(`Processing transfer ${i+1}/${path.length-1}: ${sourceChain} → ${destinationChain}`);
+        
+        // Execute the transfer using worker
+        const task = this.createCrossChainTask(
+          sourceChain,
+          destinationChain,
+          privateKey,
+          walletIndex,
+          progressData,
+          transferAmount,
+          `${questName}-${i+1}/${path.length-1}`
+        );
+        
+        // Run the task directly, not in a batch
+        const result = await workerManager.runWorker(task.workerPath, task.workerData);
+        
+        if (!result.success) {
           allSuccess = false;
-          logger.error(`Error at transfer ${i+1}: ${error.message}`);
-          break;
+          failedSteps.push(`${i+1}: ${sourceChain} → ${destinationChain}`);
+          logger.error(`Failed at transfer ${i+1}: ${sourceChain} → ${destinationChain}`);
+          // We continue to the next step despite the failure
         }
       }
       
+      // Update progress if all transfers were successful
       if (allSuccess) {
         logger.info(`Successfully completed cross-chain path: ${path.join(' → ')}`);
         
@@ -198,16 +207,60 @@ class CrossChainQuestService {
         await progressService.updateCrossChainQuest(questName, true);
         
         logger.info(`Successfully completed the '${questName}' quest!`);
-        return true;
       } else {
-        logger.error(`Failed to complete the '${questName}' quest`);
-        return false;
+        if (failedSteps.length > 0) {
+          logger.error(`Quest '${questName}' not completed due to failed steps: ${failedSteps.join(', ')}`);
+          logger.info(`Continuing to next quest. You can retry this quest later.`);
+        } else {
+          logger.error(`Failed to complete the '${questName}' quest for unknown reasons`);
+        }
       }
+      
+      return allSuccess;
       
     } catch (error) {
       logger.error(`Error executing cross-chain quest: ${error.message}`);
       return false;
     }
+  }
+  
+  /**
+   * Create a cross-chain transfer task
+   * @param {string} sourceChain - Source chain name
+   * @param {string} destChain - Destination chain name
+   * @param {string} privateKey - Private key
+   * @param {number} walletIndex - Wallet index
+   * @param {Object} progressData - Progress data
+   * @param {string} amount - Transfer amount
+   * @param {string} taskId - Task identifier
+   * @returns {Object} Task object for worker manager
+   */
+  createCrossChainTask(sourceChain, destChain, privateKey, walletIndex, progressData, amount, taskId) {
+    // Get receiver address for the destination chain
+    const receiverAddress = progressData.addresses[destChain];
+    
+    // Choose transfer type from source to destination
+    const transferType = `${sourceChain}_TO_${destChain}`;
+    
+    // Create unique worker ID
+    const workerId = `cross-chain-${transferType}-${walletIndex}-${taskId}-${Date.now()}`;
+    
+    return {
+      workerPath: 'transferWorker.js',
+      workerData: {
+        workerId,
+        walletIndex,
+        privateKey,
+        sourceChain,
+        destinationChain: destChain,
+        receiverAddress,
+        amount,
+        config: this.config,
+        transferType,
+        updateProgress: false, // Cross-chain progress updated after all transfers complete
+        isCrossChain: true
+      }
+    };
   }
 }
 

@@ -1,7 +1,7 @@
 // core/faucet/faucetService.js
 import { createWalletLogger } from '../../utils/logger.js';
 import ProgressService from '../progress/progress.js';
-import { Worker } from 'worker_threads';
+import workerManager from '../workers/workerManager.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { sleep } from '../../utils/common.js';
@@ -45,34 +45,36 @@ class FaucetService {
     const maxConcurrentThreads = options.threads || 3; // Default to 3 concurrent threads
     this.logger.info(`Using ${maxConcurrentThreads} concurrent threads`);
     
-    // Process wallets in batches
-    let processedCount = 0;
+    // Prepare tasks for all wallets
+    const tasks = [];
     
-    while (processedCount < walletCount) {
-      const batch = [];
-      const batchSize = Math.min(maxConcurrentThreads, walletCount - processedCount);
-      
-      for (let i = 0; i < batchSize; i++) {
-        const walletIndex = processedCount + i;
-        batch.push(this.run(privateKeys[walletIndex], walletIndex, options));
-      }
-      
-      // Wait for all workers in this batch to complete
-      await Promise.all(batch);
-      
-      processedCount += batchSize;
-      
-      if (processedCount < walletCount) {
-        this.logger.info(`Processed ${processedCount}/${walletCount} wallets. Continuing with next batch...`);
-        await sleep(2000); // Small delay between batches
+    for (let i = 0; i < walletCount; i++) {
+      try {
+        const task = await this.prepareFaucetTask(privateKeys[i], i, options);
+        if (task) {
+          tasks.push(task);
+        }
+      } catch (error) {
+        this.logger.error(`Error preparing faucet task for wallet ${i+1}: ${error.message}`);
       }
     }
     
-    this.logger.info(`Completed faucet requests for all ${walletCount} wallets`);
+    if (tasks.length === 0) {
+      this.logger.info('No faucet tasks to process');
+      return;
+    }
+    
+    // Process all tasks
+    this.logger.info(`Prepared ${tasks.length} faucet tasks`);
+    const results = await workerManager.runBatch(tasks, maxConcurrentThreads);
+    
+    // Process results
+    const successCount = results.filter(r => r.success).length;
+    this.logger.info(`Completed ${successCount}/${tasks.length} faucet requests`);
   }
 
   /**
-   * Run faucet request for a single wallet using a worker thread
+   * Run faucet request for a single wallet
    * @param {string} privateKey - Private key
    * @param {number} walletIndex - Wallet index
    * @param {Object} options - Faucet options
@@ -80,104 +82,96 @@ class FaucetService {
    */
   async run(privateKey, walletIndex, options = {}) {
     const logger = createWalletLogger(walletIndex);
-    logger.info('Starting faucet request process in worker thread');
+    logger.info('Starting faucet request process');
     
-    const progressService = new ProgressService(walletIndex);
-    const progressData = await progressService.readProgressData();
-    
-    const { faucet, maxAttempts, apiKey } = options;
-    
-    // Get the address for the selected chain
-    const address = progressData.addresses[faucet];
-    if (!address) {
-      logger.error(`No ${faucet} address found for wallet ${walletIndex + 1}`);
-      return false;
-    }
-    
-    logger.info(`Requesting ${faucet} faucet for address ${address} using worker thread`);
-    
-    // Set up chain parameters based on the faucet
-    const chainConfig = {
-      'UNION': {
-        chainId: 'union-testnet-9',
-        denom: 'muno',
-        endpoint: this.config.chains.UNION.rpcEndpoint
-      },
-      'STARGAZE': {
-        chainId: 'elgafar-1',
-        denom: 'ustars',
-        endpoint: this.config.chains.STARGAZE.rpcEndpoint
+    try {
+      // Prepare faucet task
+      const task = await this.prepareFaucetTask(privateKey, walletIndex, options);
+      
+      if (!task) {
+        logger.warn('No faucet task to process');
+        return false;
       }
-    }[faucet];
-    
-    if (!chainConfig) {
-      logger.error(`Unsupported faucet: ${faucet}`);
+      
+      // Run the task
+      const [result] = await workerManager.runBatch([task]);
+      
+      return result && result.success;
+    } catch (error) {
+      logger.error(`Error running faucet for wallet ${walletIndex + 1}: ${error.message}`);
       return false;
     }
+  }
+  
+  /**
+   * Prepare a faucet task for a wallet
+   * @param {string} privateKey - Private key
+   * @param {number} walletIndex - Wallet index
+   * @param {Object} options - Faucet options
+   * @returns {Promise<Object|null>} Task object or null if not applicable
+   */
+  async prepareFaucetTask(privateKey, walletIndex, options) {
+    const logger = createWalletLogger(walletIndex);
     
-    // Worker file path
-    const workerPath = path.join(__dirname, 'faucetWorker.js');
-    
-    // Worker data
-    const workerData = {
-      walletIndex,
-      workerId: `${faucet}-${walletIndex}`,
-      apiKey,
-      address,
-      faucet,
-      chainConfig,
-      siteKey: this.faucetSiteKeys[faucet],
-      faucetReferrer: this.faucetReferrer,
-      faucetEndpoint: this.faucetEndpoint,
-      maxAttempts
-    };
-    
-    // Create and run worker
-    return new Promise((resolve, reject) => {
-      try {
-        logger.info(`Starting worker thread for wallet ${walletIndex + 1}`);
-        
-        const worker = new Worker(workerPath, { 
-          workerData,
-          // ES modules need to use specific type
-          type: 'module'
-        });
-        
-        // Handle messages from worker
-        worker.on('message', (message) => {
-          if (message.success) {
-            logger.info(`Worker completed successfully for wallet ${walletIndex + 1}`);
-            resolve(true);
-          } else {
-            logger.error(`Worker failed for wallet ${walletIndex + 1}: ${message.error}`);
-            resolve(false);
-          }
-        });
-        
-        // Handle worker errors
-        worker.on('error', (error) => {
-          logger.error(`Worker error for wallet ${walletIndex + 1}: ${error.message}`);
-          if (error.stack) {
-            logger.error(`Stack trace: ${error.stack}`);
-          }
-          resolve(false);
-        });
-        
-        // Handle worker exit
-        worker.on('exit', (code) => {
-          if (code !== 0) {
-            logger.error(`Worker for wallet ${walletIndex + 1} exited with code ${code}`);
-            resolve(false);
-          }
-        });
-      } catch (error) {
-        logger.error(`Error creating worker for wallet ${walletIndex + 1}: ${error.message}`);
-        if (error.stack) {
-          logger.error(`Stack trace: ${error.stack}`);
+    try {
+      const progressService = new ProgressService(walletIndex);
+      const progressData = await progressService.readProgressData();
+      
+      const { faucet, maxAttempts, apiKey } = options;
+      
+      // Get the address for the selected chain
+      const address = progressData.addresses[faucet];
+      if (!address) {
+        logger.error(`No ${faucet} address found for wallet ${walletIndex + 1}`);
+        return null;
+      }
+      
+      logger.info(`Preparing ${faucet} faucet request for address ${address}`);
+      
+      // Set up chain parameters based on the faucet
+      const chainConfig = {
+        'UNION': {
+          chainId: 'union-testnet-9',
+          denom: 'muno',
+          endpoint: this.config.chains.UNION.rpcEndpoint
+        },
+        'STARGAZE': {
+          chainId: 'elgafar-1',
+          denom: 'ustars',
+          endpoint: this.config.chains.STARGAZE.rpcEndpoint
         }
-        resolve(false);
+      }[faucet];
+      
+      if (!chainConfig) {
+        logger.error(`Unsupported faucet: ${faucet}`);
+        return null;
       }
-    });
+      
+      // Create unique worker ID
+      const workerId = `faucet-${faucet}-${walletIndex}-${Date.now()}`;
+      
+      // Worker data
+      const workerData = {
+        walletIndex,
+        workerId,
+        apiKey,
+        address,
+        faucet,
+        chainConfig,
+        siteKey: this.faucetSiteKeys[faucet],
+        faucetReferrer: this.faucetReferrer,
+        faucetEndpoint: this.faucetEndpoint,
+        maxAttempts
+      };
+      
+      return {
+        workerPath: '../faucetWorker.js',
+        workerData
+      };
+    } catch (error) {
+      logger.error(`Error preparing faucet task: ${error.message}`);
+      return null;
+    }
   }
 }
 

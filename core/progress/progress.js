@@ -1,9 +1,10 @@
+// core/progress/progress.js
 import fs from 'fs/promises';
 import path from 'path';
 import { createWalletLogger } from '../../utils/logger.js';
 
 /**
- * Service for managing progress data with enhanced reliability
+ * Service for managing progress data with improved thread safety
  */
 class ProgressService {
   /**
@@ -14,10 +15,11 @@ class ProgressService {
     this.walletIndex = walletIndex;
     this.logger = createWalletLogger(walletIndex);
     this.dataDir = path.join(process.cwd(), 'data');
-    this.filename = `progress-${walletIndex}.json`;
-    this.filePath = path.join(this.dataDir, this.filename);
-    this.tempFilePath = path.join(this.dataDir, `progress-${walletIndex}.tmp.json`);
-    this.backupFilePath = path.join(this.dataDir, `progress-${walletIndex}.backup.json`);
+    this.filePath = path.join(this.dataDir, `progress-${walletIndex}.json`);
+    
+    // Progress file lock tracking
+    this.lockTimeout = 10000; // 10 seconds max wait time for lock
+    this.lockRetryInterval = 100; // 100ms between lock attempts
   }
   
   /**
@@ -98,7 +100,51 @@ class ProgressService {
   }
   
   /**
-   * Read progress data from file
+   * Wait for file lock to be available
+   * @returns {Promise<boolean>} True if lock acquired, false on timeout
+   */
+  async waitForLock() {
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < this.lockTimeout) {
+      try {
+        // Check for existence of lock file
+        const lockPath = `${this.filePath}.lock`;
+        await fs.access(lockPath);
+        
+        // Lock file exists, wait and retry
+        await new Promise(resolve => setTimeout(resolve, this.lockRetryInterval));
+      } catch (error) {
+        // Lock file doesn't exist, we can acquire the lock
+        try {
+          // Create lock file
+          await fs.writeFile(`${this.filePath}.lock`, Date.now().toString(), 'utf8');
+          return true;
+        } catch (lockError) {
+          // Failed to create lock file, another process might have created it first
+          this.logger.warn(`Failed to acquire lock: ${lockError.message}`);
+        }
+      }
+    }
+    
+    this.logger.error(`Timeout waiting for progress file lock`);
+    return false;
+  }
+  
+  /**
+   * Release file lock
+   * @returns {Promise<void>}
+   */
+  async releaseLock() {
+    try {
+      await fs.unlink(`${this.filePath}.lock`);
+    } catch (error) {
+      this.logger.warn(`Failed to release lock: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Read progress data from file with thread safety
    * @returns {Promise<Object>} Progress data
    */
   async readProgressData() {
@@ -121,10 +167,12 @@ class ProgressService {
         return defaultData;
       }
       
-      // If it's a JSON parse error, try to recover from backup
+      // If it's a JSON parse error, use default data
       if (error instanceof SyntaxError) {
-        this.logger.error(`JSON parse error, attempting to recover from backup: ${error.message}`);
-        return this.recoverFromBackup();
+        this.logger.error(`JSON parse error, using default data: ${error.message}`);
+        const defaultData = this.getDefaultProgressData();
+        await this.saveProgressData(defaultData);
+        return defaultData;
       }
       
       this.logger.error(`Error reading progress data: ${error.message}`);
@@ -133,11 +181,16 @@ class ProgressService {
   }
   
   /**
-   * Save progress data to file with atomic write
+   * Save progress data to file with thread safety
    * @param {Object} data - Progress data to save
    * @returns {Promise<void>}
    */
   async saveProgressData(data) {
+    // Acquire lock
+    if (!await this.waitForLock()) {
+      throw new Error('Could not acquire lock for saving progress data');
+    }
+    
     try {
       // Ensure the data directory exists
       await this.ensureDataDirExists();
@@ -145,27 +198,16 @@ class ProgressService {
       // Validate and update the data
       const validatedData = this.validateProgressData(data);
       
-      // Create a backup of the current file if it exists
-      try {
-        const currentData = await fs.readFile(this.filePath, 'utf8');
-        await fs.writeFile(this.backupFilePath, currentData, 'utf8');
-      } catch (backupError) {
-        // If the file doesn't exist, no need to backup
-        if (backupError.code !== 'ENOENT') {
-          this.logger.warn(`Could not create backup: ${backupError.message}`);
-        }
-      }
-      
-      // Write to a temporary file first
-      await fs.writeFile(this.tempFilePath, JSON.stringify(validatedData, null, 2), 'utf8');
-      
-      // Atomically rename the temporary file to the actual file
-      await fs.rename(this.tempFilePath, this.filePath);
+      // Write data directly to the file
+      await fs.writeFile(this.filePath, JSON.stringify(validatedData, null, 2), 'utf8');
       
       this.logger.info(`Progress saved for wallet ${this.walletIndex + 1}`);
     } catch (error) {
       this.logger.error(`Error saving progress data: ${error.message}`);
       throw error;
+    } finally {
+      // Release lock
+      await this.releaseLock();
     }
   }
   
@@ -175,44 +217,28 @@ class ProgressService {
    * @returns {Promise<Object>} Updated progress data
    */
   async updateProgressData(updateFn) {
-    // Read current data
-    const currentData = await this.readProgressData();
+    // Acquire lock
+    if (!await this.waitForLock()) {
+      throw new Error('Could not acquire lock for updating progress data');
+    }
     
-    // Apply the update function
-    const updatedData = updateFn(currentData);
-    
-    // Save the updated data
-    await this.saveProgressData(updatedData);
-    
-    return updatedData;
-  }
-  
-  /**
-   * Attempt to recover progress data from backup
-   * @returns {Promise<Object>} Recovered progress data or default data if recovery fails
-   */
-  async recoverFromBackup() {
     try {
-      // Try to read from backup file
-      const backupData = await fs.readFile(this.backupFilePath, 'utf8');
-      const recoveredData = JSON.parse(backupData);
+      // Read current data
+      const currentData = await this.readProgressData();
       
-      this.logger.info(`Successfully recovered progress data from backup for wallet ${this.walletIndex + 1}`);
+      // Apply the update function
+      const updatedData = updateFn(currentData);
       
-      // Save the recovered data to the main file
-      await fs.writeFile(this.filePath, backupData, 'utf8');
+      // Save the updated data (without lock since we already have it)
+      await fs.writeFile(this.filePath, JSON.stringify(this.validateProgressData(updatedData), null, 2), 'utf8');
       
-      return this.validateProgressData(recoveredData);
+      return updatedData;
     } catch (error) {
-      this.logger.error(`Could not recover from backup: ${error.message}`);
-      
-      // If recovery fails, return default data
-      const defaultData = this.getDefaultProgressData();
-      
-      // Save the default data
-      await this.saveProgressData(defaultData);
-      
-      return defaultData;
+      this.logger.error(`Error updating progress data: ${error.message}`);
+      throw error;
+    } finally {
+      // Release lock
+      await this.releaseLock();
     }
   }
   

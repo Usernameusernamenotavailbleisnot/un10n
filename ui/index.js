@@ -23,6 +23,7 @@ import {
 import { readPrivateKeys } from '../core/blockchain/wallet.js';
 import ProgressService from '../core/progress/progress.js';
 import logger from '../utils/logger.js';
+import workerManager from '../core/workers/workerManager.js';
 
 /**
  * Run the interactive UI
@@ -92,6 +93,13 @@ async function handleDailyCommand(dailyService, privateKeys) {
   // Prompt for wallet selection
   const { walletIndex } = await promptForWallet(privateKeys.length);
   
+  // Prompt for thread count if running for all wallets
+  let threadCount = 3;
+  if (walletIndex === 'all') {
+    const { threads, customThreads } = await promptForThreadCount();
+    threadCount = threads === 'custom' ? customThreads : threads;
+  }
+  
   // Create spinner
   const spinner = createSpinner('Initializing daily interactions');
   spinner.start();
@@ -99,8 +107,8 @@ async function handleDailyCommand(dailyService, privateKeys) {
   try {
     if (walletIndex === 'all') {
       // Process all wallets
-      spinner.text = 'Running daily interactions for all wallets';
-      await dailyService.runForAll(privateKeys);
+      spinner.text = `Running daily interactions for all wallets using ${threadCount} threads`;
+      await dailyService.runForAll(privateKeys, threadCount);
     } else {
       // Process only the specified wallet
       spinner.text = `Running daily interactions for wallet ${walletIndex + 1}`;
@@ -138,6 +146,13 @@ async function handleTransferCommand(transferService, privateKeys, config) {
                         countOption === 'next' ? 'next' : 
                         countOption;
   
+  // Prompt for thread count if running for all wallets
+  let threadCount = 3;
+  if (walletIndex === 'all') {
+    const { threads, customThreads } = await promptForThreadCount();
+    threadCount = threads === 'custom' ? customThreads : threads;
+  }
+  
   // Prepare options
   const options = {
     chain: chain === 'all' ? null : chain,
@@ -149,9 +164,10 @@ async function handleTransferCommand(transferService, privateKeys, config) {
   const chainDisplay = chain === 'all' ? 'all chains' : chain;
   const countDisplay = transferCount === 'next' ? 'transfers to complete next quest' : 
                        `${transferCount} transfer(s)`;
+  const threadDisplay = walletIndex === 'all' ? ` using ${threadCount} threads` : '';
   
   const { confirmed } = await promptForConfirmation(
-    `Run ${countDisplay} for ${chainDisplay}?`
+    `Run ${countDisplay} for ${chainDisplay}${threadDisplay}?`
   );
   
   if (!confirmed) {
@@ -166,8 +182,8 @@ async function handleTransferCommand(transferService, privateKeys, config) {
   try {
     if (walletIndex === 'all') {
       // Process all wallets
-      spinner.text = 'Running transfers for all wallets';
-      await transferService.runForAll(privateKeys, options);
+      spinner.text = `Running transfers for all wallets using ${threadCount} threads`;
+      await transferService.runForAll(privateKeys, options, threadCount);
     } else {
       // Process only the specified wallet
       spinner.text = `Running transfers for wallet ${walletIndex + 1}`;
@@ -204,6 +220,13 @@ async function handleCrossChainCommand(crossChainService, privateKeys, config) {
     amount = amountOption === 'custom' ? customAmount : config.DEFAULT_TRANSFER_AMOUNT;
   }
   
+  // Prompt for thread count if running for all wallets
+  let threadCount = 3;
+  if (walletIndex === 'all') {
+    const { threads, customThreads } = await promptForThreadCount();
+    threadCount = threads === 'custom' ? customThreads : threads;
+  }
+  
   // Prepare options
   const options = {
     quest: quest === 'all' ? null : quest,
@@ -213,9 +236,10 @@ async function handleCrossChainCommand(crossChainService, privateKeys, config) {
   
   // Display confirmation
   const questDisplay = quest === 'all' ? 'all cross-chain quests' : quest;
+  const threadDisplay = walletIndex === 'all' ? ` using ${threadCount} threads` : '';
   
   const { confirmed } = await promptForConfirmation(
-    `Run ${questDisplay} with amount ${amount}?`
+    `Run ${questDisplay} with amount ${amount}${threadDisplay}?`
   );
   
   if (!confirmed) {
@@ -231,7 +255,7 @@ async function handleCrossChainCommand(crossChainService, privateKeys, config) {
     if (walletIndex === 'all') {
       // Process all wallets
       spinner.text = 'Running cross-chain quests for all wallets';
-      await crossChainService.runForAll(privateKeys, options);
+      await crossChainService.runForAll(privateKeys, options, threadCount);
     } else {
       // Process only the specified wallet
       spinner.text = `Running cross-chain quests for wallet ${walletIndex + 1}`;
@@ -331,11 +355,19 @@ async function handleFullCommand(services, privateKeys) {
   // Prompt for wallet selection
   const { walletIndex } = await promptForWallet(privateKeys.length);
   
+  // Prompt for thread count
+  let threadCount = 3;
+  const { threads, customThreads } = await promptForThreadCount();
+  threadCount = threads === 'custom' ? customThreads : threads;
+  
+  // Set thread count for worker manager
+  workerManager.setMaxConcurrentWorkers(threadCount);
+  
   // Display confirmation
   const walletDisplay = walletIndex === 'all' ? 'all wallets' : `wallet ${walletIndex + 1}`;
   
   const { confirmed } = await promptForConfirmation(
-    `Run full automation for ${walletDisplay}?`
+    `Run full automation for ${walletDisplay} using ${threadCount} threads?`
   );
   
   if (!confirmed) {
@@ -354,12 +386,12 @@ async function handleFullCommand(services, privateKeys) {
       
       for (let i = 0; i < privateKeys.length; i++) {
         spinner.text = `Running full automation for wallet ${i + 1}/${privateKeys.length}`;
-        await runFullAutomation(services, privateKeys[i], i);
+        await runFullAutomation(services, privateKeys[i], i, threadCount);
       }
     } else {
       // Process only the specified wallet
       spinner.text = `Running full automation for wallet ${walletIndex + 1}`;
-      await runFullAutomation(services, privateKeys[walletIndex], walletIndex);
+      await runFullAutomation(services, privateKeys[walletIndex], walletIndex, threadCount);
     }
     
     spinner.succeed('Full automation completed successfully');
@@ -374,8 +406,9 @@ async function handleFullCommand(services, privateKeys) {
  * @param {Object} services - All services
  * @param {string} privateKey - Private key
  * @param {number} walletIndex - Wallet index
+ * @param {number} threads - Number of threads to use
  */
-async function runFullAutomation(services, privateKey, walletIndex) {
+async function runFullAutomation(services, privateKey, walletIndex, threads) {
   // 1. Run daily interactions
   await services.daily.run(privateKey, walletIndex);
   

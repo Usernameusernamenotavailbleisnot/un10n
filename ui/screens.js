@@ -1,3 +1,4 @@
+// ui/screens.js
 import chalk from 'chalk';
 import figlet from 'figlet';
 import clear from 'clear';
@@ -15,7 +16,7 @@ function displayBanner() {
       figlet.textSync('Union Quest Bot', { horizontalLayout: 'full' })
     )
   );
-  console.log(chalk.cyan('Interactive Terminal UI'));
+  console.log(chalk.cyan('Interactive Terminal UI - Multi-threaded Edition'));
   console.log();
 }
 
@@ -76,11 +77,19 @@ function createSpinner(text) {
   const spinner = ora({
     text,
     color: 'cyan',
-    discardStdin: false
+    discardStdin: false,
+    spinner: 'dots'
   }).start();
   
   // Register the spinner with the logger
   setActiveSpinner(spinner);
+  
+  // Add cleanup function to remove spinner when stopped
+  const originalStop = spinner.stop.bind(spinner);
+  spinner.stop = function(...args) {
+    setActiveSpinner(null);
+    return originalStop(...args);
+  };
   
   return spinner;
 }

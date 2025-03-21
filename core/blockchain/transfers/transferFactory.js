@@ -1,4 +1,5 @@
 import UnionToUnionTransfer from './unionToUnion.js';
+import BabylonToBabylonTransfer from './babylonToBabylon.js';
 import UnifiedIBCTransfer from './unifiedIBCTransfer.js';
 import { createWalletLogger } from '../../../utils/logger.js';
 
@@ -38,6 +39,13 @@ class TransferFactory {
     // Special case for same-chain transfers, which use a different mechanism
     if (transferType === 'UNION_TO_UNION') {
       const instance = new UnionToUnionTransfer(this.config, this.walletIndex, this.privateKey);
+      this.transferInstances[transferType] = instance;
+      return instance;
+    }
+    
+    // Special case for Babylon to Babylon transfers
+    if (transferType === 'BABYLON_TO_BABYLON') {
+      const instance = new BabylonToBabylonTransfer(this.config, this.walletIndex, this.privateKey);
       this.transferInstances[transferType] = instance;
       return instance;
     }

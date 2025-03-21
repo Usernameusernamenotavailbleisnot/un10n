@@ -1,10 +1,10 @@
+// core/quests/transferQuest.js
 import { createWalletLogger } from '../../utils/logger.js';
 import ProgressService from '../progress/progress.js';
-import TransferFactory from '../blockchain/transfers/transferFactory.js';
-import { sleep } from '../../utils/common.js';
+import workerManager from '../workers/workerManager.js';
 
 /**
- * Service for handling transfer quests
+ * Service for handling transfer quests with multi-threading support
  */
 class TransferQuestService {
   /**
@@ -17,28 +17,49 @@ class TransferQuestService {
   }
 
   /**
-   * Run transfer quests for all wallets
+   * Run transfer quests for all wallets with multi-threading
    * @param {string[]} privateKeys - Array of private keys
    * @param {Object} options - Transfer options
+   * @param {number} maxThreads - Maximum number of concurrent threads
    * @returns {Promise<void>}
    */
-  async runForAll(privateKeys, options) {
-    this.logger.info(`Running transfer quests for ${privateKeys.length} wallets`);
+  async runForAll(privateKeys, options, maxThreads = 3) {
+    this.logger.info(`Running transfer quests for ${privateKeys.length} wallets with max ${maxThreads} threads`);
+    
+    // Create tasks for wallets where each wallet is a separate task
+    const walletTasks = [];
     
     for (let i = 0; i < privateKeys.length; i++) {
-      try {
-        await this.run(privateKeys[i], i, options);
-        
-        // Add a small delay between wallets
-        if (i < privateKeys.length - 1) {
-          this.logger.info('Waiting 2 seconds before processing next wallet...');
-          await sleep(2000);
-        }
-      } catch (error) {
-        this.logger.error(`Failed to process wallet ${i+1}: ${error.message}`);
-        // Continue with next wallet
-      }
+      walletTasks.push({
+        privateKey: privateKeys[i],
+        walletIndex: i
+      });
     }
+    
+    // Process wallets in parallel based on maxThreads
+    // We'll use our own batching here to ensure correct threading
+    const batchSize = Math.min(maxThreads, walletTasks.length);
+    let processedCount = 0;
+    
+    while (processedCount < walletTasks.length) {
+      const batch = [];
+      const currentBatchSize = Math.min(batchSize, walletTasks.length - processedCount);
+      
+      this.logger.info(`Processing wallet batch ${processedCount+1}-${processedCount+currentBatchSize} of ${walletTasks.length}`);
+      
+      // Start tasks in this batch concurrently
+      for (let i = 0; i < currentBatchSize; i++) {
+        const task = walletTasks[processedCount + i];
+        batch.push(this.run(task.privateKey, task.walletIndex, options));
+      }
+      
+      // Wait for all wallets in this batch to complete
+      await Promise.all(batch);
+      
+      processedCount += currentBatchSize;
+    }
+    
+    this.logger.info(`Completed transfer quests for all ${walletTasks.length} wallets`);
   }
 
   /**
@@ -52,9 +73,49 @@ class TransferQuestService {
     const logger = createWalletLogger(walletIndex);
     logger.info('Starting transfer quest processing');
     
-    const progressService = new ProgressService(walletIndex);
+    // Prepare tasks for this wallet
+    const tasks = await this.prepareWalletTasks(privateKey, walletIndex, options);
     
-    // Read progress data
+    if (tasks.length === 0) {
+      logger.info('No transfer tasks needed for this wallet');
+      return;
+    }
+    
+    // Process all tasks for this wallet SEQUENTIALLY
+    // This ensures one wallet doesn't use multiple threads
+    logger.info(`Prepared ${tasks.length} transfer tasks`);
+    
+    let successCount = 0;
+    let failCount = 0;
+    
+    // Process each task one by one
+    for (const task of tasks) {
+      try {
+        const result = await workerManager.runWorker(task.workerPath, task.workerData);
+        if (result.success) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (error) {
+        logger.error(`Error running transfer task: ${error.message}`);
+        failCount++;
+      }
+    }
+    
+    logger.info(`Completed ${successCount}/${tasks.length} transfers (${failCount} failed)`);
+  }
+  
+  /**
+   * Prepare transfer tasks for a wallet
+   * @param {string} privateKey - Private key
+   * @param {number} walletIndex - Wallet index
+   * @param {Object} options - Transfer options
+   * @returns {Promise<Array>} Array of task objects
+   */
+  async prepareWalletTasks(privateKey, walletIndex, options = {}) {
+    const logger = createWalletLogger(walletIndex);
+    const progressService = new ProgressService(walletIndex);
     const progressData = await progressService.readProgressData();
     
     // Determine which chain(s) to process
@@ -68,7 +129,9 @@ class TransferQuestService {
       chainsToProcess.push('UNION', 'BABYLON');
     }
     
-    // Process each chain
+    // Prepare tasks for each chain
+    const tasks = [];
+    
     for (const destChain of chainsToProcess) {
       const currentCount = progressData.transfers[destChain].count;
       
@@ -86,28 +149,30 @@ class TransferQuestService {
       }
       
       if (transfersToPerform > 0) {
-        logger.info(`Will perform ${transfersToPerform} transfers TO ${destChain}`);
+        // Get a suitable source chain for this destination
+        const sourceChain = this.getSuitableSourceChain(destChain, progressData);
         
-        // Perform the transfers
-        const result = await this.performTransfers(
-          destChain, 
-          transfersToPerform, 
-          progressData, 
-          privateKey, 
-          walletIndex
-        );
+        logger.info(`Will perform ${transfersToPerform} transfers from ${sourceChain} TO ${destChain}`);
         
-        if (result.successCount > 0) {
-          logger.info(`Successfully performed ${result.successCount} transfers TO ${destChain}`);
-        }
-        
-        if (result.failCount > 0) {
-          logger.error(`${result.failCount} transfers TO ${destChain} failed`);
+        // Create tasks for each transfer
+        for (let i = 0; i < transfersToPerform; i++) {
+          const task = this.createTransferTask(
+            sourceChain,
+            destChain,
+            privateKey,
+            walletIndex,
+            progressData,
+            `${i+1}/${transfersToPerform}`
+          );
+          
+          tasks.push(task);
         }
       } else {
         logger.info(`No transfers needed for ${destChain} or all quests completed`);
       }
     }
+    
+    return tasks;
   }
   
   /**
@@ -160,87 +225,41 @@ class TransferQuestService {
   }
   
   /**
-   * Perform a series of transfers
-   * @param {string} destChain - Destination chain
-   * @param {number} count - Number of transfers to perform
-   * @param {Object} progressData - Progress data
+   * Create a transfer task
+   * @param {string} sourceChain - Source chain name
+   * @param {string} destChain - Destination chain name
    * @param {string} privateKey - Private key
    * @param {number} walletIndex - Wallet index
-   * @returns {Promise<{successCount: number, failCount: number}>} Transfer results
+   * @param {Object} progressData - Progress data
+   * @param {string} index - Task index for logging (e.g., "1/5")
+   * @returns {Object} Task object for worker manager
    */
-  async performTransfers(destChain, count, progressData, privateKey, walletIndex) {
-    const logger = createWalletLogger(walletIndex);
+  createTransferTask(sourceChain, destChain, privateKey, walletIndex, progressData, index) {
+    // Get receiver address for the destination chain
+    const receiverAddress = progressData.addresses[destChain];
     
-    try {
-      logger.info(`Performing ${count} transfers TO ${destChain}`);
-      
-      let successCount = 0;
-      let failCount = 0;
-      
-      // Get a suitable source chain for this destination
-      const sourceChain = this.getSuitableSourceChain(destChain, progressData);
-      logger.info(`Using ${sourceChain} as source chain for transfers to ${destChain}`);
-      
-      // Choose transfer type from source to destination
-      const transferType = `${sourceChain}_TO_${destChain}`;
-      
-      // Get receiver address for the destination chain
-      const receiverAddress = progressData.addresses[destChain];
-      if (!receiverAddress) {
-        logger.error(`Missing address for ${destChain}`);
-        return { successCount: 0, failCount: count };
+    // Choose transfer type from source to destination
+    const transferType = `${sourceChain}_TO_${destChain}`;
+    
+    // Create unique worker ID
+    const workerId = `transfer-${transferType}-${walletIndex}-${index}-${Date.now()}`;
+    
+    return {
+      workerPath: 'transferWorker.js',
+      workerData: {
+        workerId,
+        walletIndex,
+        privateKey,
+        sourceChain,
+        destinationChain: destChain,
+        receiverAddress,
+        amount: this.config.DEFAULT_TRANSFER_AMOUNT,
+        config: this.config,
+        transferType,
+        updateProgress: true,
+        isDaily: false
       }
-      
-      // Create transfer handler
-      try {
-        const transferFactory = new TransferFactory(this.config, walletIndex, privateKey);
-        const transfer = transferFactory.createTransfer(transferType);
-        
-        // Perform transfers
-        for (let i = 0; i < count; i++) {
-          try {
-            logger.info(`Processing transfer ${i+1}/${count} from ${sourceChain} to ${destChain}`);
-            
-            // Execute transfer
-            const result = await transfer.transfer(
-              receiverAddress,
-              this.config.DEFAULT_TRANSFER_AMOUNT
-            );
-            
-            // Check if transfer was successful
-            if (result && (result.success || result.inMempool || result.pending)) {
-              successCount++;
-              
-              // Update progress
-              const progressService = new ProgressService(walletIndex);
-              await progressService.updateTransferCount(destChain);
-              
-              logger.info(`Transfer ${i+1} successful`);
-            } else {
-              failCount++;
-              logger.error(`Transfer ${i+1} failed`);
-            }
-            
-            // Wait between transfers to avoid rate limiting
-            if (i < count - 1) {
-              logger.info('Waiting for 5 seconds before next transfer...');
-              await sleep(5000);
-            }
-          } catch (error) {
-            failCount++;
-            logger.error(`Transfer ${i+1} failed: ${error.message}`);
-          }
-        }
-      } catch (error) {
-        logger.error(`Error creating transfer handler: ${error.message}`);
-        failCount = count;
-      }
-      
-      return { successCount, failCount };
-    } catch (error) {
-      logger.error(`Error performing transfers TO ${destChain}: ${error.message}`);
-      return { successCount: 0, failCount: count };
-    }
+    };
   }
 }
 

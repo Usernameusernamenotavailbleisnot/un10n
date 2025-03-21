@@ -1,17 +1,38 @@
+// utils/logger.js
 import winston from 'winston';
 import path from 'path';
 import fs from 'fs';
 import { EventEmitter } from 'events';
 
 // Increase the default max listeners for EventEmitter to avoid warnings
-EventEmitter.defaultMaxListeners = 50;
+EventEmitter.defaultMaxListeners = 100;
+
+// Create singleton event emitter for logger-spinner coordination
+const loggerEvents = new EventEmitter();
 
 // Global spinner reference that can be accessed by the logger
 let activeSpinner = null;
 
 // Function to set the active spinner
 export function setActiveSpinner(spinner) {
-  activeSpinner = spinner;
+  if (spinner) {
+    activeSpinner = spinner;
+    // Set up event listeners for the spinner
+    loggerEvents.on('log', () => {
+      if (activeSpinner && activeSpinner.isSpinning) {
+        activeSpinner.stop();
+        process.nextTick(() => {
+          if (activeSpinner) {
+            activeSpinner.start();
+          }
+        });
+      }
+    });
+  } else {
+    // Clear the spinner and remove listeners
+    activeSpinner = null;
+    loggerEvents.removeAllListeners('log');
+  }
 }
 
 // Ensure logs directory exists
@@ -36,29 +57,58 @@ const logFormat = printf(({ level, message, timestamp, walletIndex, category, op
   return `[${timestamp}] ${walletInfo}${categoryInfo}${operationInfo} ${level}: ${message}`;
 });
 
-// Create a custom console transport that handles spinners
+// Create a mutex to prevent multiple threads from writing logs simultaneously
+const logMutex = {
+  locked: false,
+  queue: [],
+  
+  async acquire() {
+    if (!this.locked) {
+      this.locked = true;
+      return true;
+    }
+    
+    return new Promise(resolve => {
+      this.queue.push(resolve);
+    });
+  },
+  
+  release() {
+    if (this.queue.length > 0) {
+      const next = this.queue.shift();
+      next(true);
+    } else {
+      this.locked = false;
+    }
+  }
+};
+
+// Create a custom console transport that handles spinners and thread safety
 const spinnerAwareConsoleTransport = new transports.Console({
   format: combine(
     colorize({ all: true }),
     logFormat
   ),
-  log: (info, callback) => {
-    // If there's an active spinner, temporarily pause it
-    const spinnerWasVisible = activeSpinner && activeSpinner.isSpinning;
-    
-    if (spinnerWasVisible) {
-      activeSpinner.stop();
+  log: async (info, callback) => {
+    try {
+      // Acquire mutex to ensure only one thread logs at a time
+      await logMutex.acquire();
+      
+      // Emit log event to notify spinner
+      loggerEvents.emit('log');
+      
+      // Write the log message
+      process.stdout.write(`${info[Symbol.for('message')]}\n`);
+      
+      // Release mutex
+      logMutex.release();
+      
+      callback();
+    } catch (error) {
+      logMutex.release();
+      console.error('Error in console transport:', error);
+      callback(error);
     }
-    
-    // Write the log message
-    process.stdout.write(`${info[Symbol.for('message')]}\n`);
-    
-    // Restart the spinner if it was active
-    if (spinnerWasVisible) {
-      activeSpinner.start();
-    }
-    
-    callback();
   }
 });
 
@@ -90,8 +140,8 @@ const logger = winston.createLogger({
   ]
 });
 
-// Map to keep track of wallet-specific transports to avoid duplicates
-const walletTransports = new Map();
+// Map to keep track of wallet-specific loggers to avoid duplicates
+const walletLoggers = new Map();
 
 /**
  * Create a child logger with wallet index
@@ -104,29 +154,33 @@ function createWalletLogger(walletIndex) {
     return logger;
   }
   
-  // Create wallet-specific log file
-  const walletLogFile = path.join(logsDir, `wallet-${walletIndex + 1}.log`);
-  
-  // Check if we already have a transport for this wallet
-  if (!walletTransports.has(walletIndex)) {
-    // Create a new transport for this wallet
-    const fileTransport = new transports.File({
-      filename: walletLogFile,
-      format: combine(
-        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-        logFormat
-      )
-    });
-    
-    // Add the transport to the logger
-    logger.add(fileTransport);
-    
-    // Store the transport reference
-    walletTransports.set(walletIndex, fileTransport);
+  // Check if we already have a logger for this wallet
+  if (walletLoggers.has(walletIndex)) {
+    return walletLoggers.get(walletIndex);
   }
   
-  // walletIndex remains 0-based internally, will be converted for display in the format
-  return logger.child({ walletIndex });
+  // Create wallet-specific log file path
+  const walletLogFile = path.join(logsDir, `wallet-${walletIndex + 1}.log`);
+  
+  // Create a custom transport for this wallet
+  const fileTransport = new transports.File({
+    filename: walletLogFile,
+    format: combine(
+      timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+      logFormat
+    )
+  });
+  
+  // Create a wallet-specific logger
+  const walletLogger = logger.child({ walletIndex });
+  
+  // Add the file transport to this logger instance
+  walletLogger.add(fileTransport);
+  
+  // Store the logger reference
+  walletLoggers.set(walletIndex, walletLogger);
+  
+  return walletLogger;
 }
 
 export default logger;
