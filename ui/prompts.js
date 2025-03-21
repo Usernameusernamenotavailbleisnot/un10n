@@ -1,3 +1,4 @@
+// ui/prompts.js
 import inquirer from 'inquirer';
 
 /**
@@ -14,6 +15,7 @@ async function promptForCommand() {
         { name: 'Run daily interactions', value: 'daily' },
         { name: 'Run transfer quests', value: 'transfer' },
         { name: 'Run cross-chain quests', value: 'cross-chain' },
+        { name: 'Request from faucet', value: 'faucet' }, // New option
         { name: 'Run full automation (all quests)', value: 'full' },
         { name: 'View progress', value: 'progress' },
         { name: 'Exit', value: 'exit' }
@@ -173,6 +175,104 @@ async function promptForConfirmation(message) {
   ]);
 }
 
+/**
+ * Prompt for selecting a faucet
+ * @returns {Promise<Object>} User's choice
+ */
+async function promptForFaucet() {
+  return inquirer.prompt([
+    {
+      type: 'list',
+      name: 'faucet',
+      message: 'Select a faucet:',
+      choices: [
+        { name: 'Union (MUNO)', value: 'UNION' },
+        { name: 'Stargaze (STARS)', value: 'STARGAZE' }
+      ]
+    }
+  ]);
+}
+
+/**
+ * Prompt for maximum faucet attempts
+ * @returns {Promise<Object>} User's choice
+ */
+async function promptForFaucetAttempts() {
+  return inquirer.prompt([
+    {
+      type: 'list',
+      name: 'maxAttemptsOption',
+      message: 'How many attempts should be made?',
+      choices: [
+        { name: 'Try until successful (unlimited)', value: 'unlimited' },
+        { name: 'Custom number of attempts', value: 'custom' }
+      ]
+    },
+    {
+      type: 'input',
+      name: 'maxAttempts',
+      message: 'Enter maximum number of attempts:',
+      when: (answers) => answers.maxAttemptsOption === 'custom',
+      validate: (value) => {
+        const parsed = parseInt(value);
+        const valid = !isNaN(parsed) && parsed > 0;
+        return valid || 'Please enter a valid number greater than 0';
+      },
+      filter: (value) => parseInt(value)
+    }
+  ]);
+}
+
+/**
+ * Prompt for Capsolver API key
+ * @returns {Promise<Object>} User's choice
+ */
+async function promptForCapsolverApiKey() {
+  return inquirer.prompt([
+    {
+      type: 'input',
+      name: 'apiKey',
+      message: 'Enter your Capsolver API key:',
+      validate: (value) => {
+        return value.trim().length > 0 || 'API key is required';
+      }
+    }
+  ]);
+}
+
+/**
+ * Prompt for thread count for parallel processing
+ * @returns {Promise<Object>} User's choice
+ */
+async function promptForThreadCount() {
+  return inquirer.prompt([
+    {
+      type: 'list',
+      name: 'threads',
+      message: 'How many threads to use for parallel processing?',
+      choices: [
+        { name: '1 thread (sequential)', value: 1 },
+        { name: '2 threads', value: 2 },
+        { name: '3 threads', value: 3 },
+        { name: '5 threads', value: 5 },
+        { name: 'Custom', value: 'custom' }
+      ]
+    },
+    {
+      type: 'input',
+      name: 'customThreads',
+      message: 'Enter number of threads:',
+      when: (answers) => answers.threads === 'custom',
+      validate: (value) => {
+        const parsed = parseInt(value);
+        return (!isNaN(parsed) && parsed > 0 && parsed <= 100) || 
+               'Please enter a valid number between 1 and 10';
+      },
+      filter: (value) => parseInt(value)
+    }
+  ]);
+}
+
 export {
   promptForCommand,
   promptForWallet,
@@ -180,5 +280,9 @@ export {
   promptForTransferCount,
   promptForCrossChainQuest,
   promptForAmount,
-  promptForConfirmation
+  promptForConfirmation,
+  promptForFaucet,
+  promptForFaucetAttempts,
+  promptForCapsolverApiKey,
+  promptForThreadCount
 };

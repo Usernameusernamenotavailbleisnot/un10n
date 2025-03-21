@@ -149,10 +149,10 @@ class TransferQuestService {
     }
     
     // Prefer STARGAZE or STRIDE for source if available
-    if (availableChains.includes('STRIDE')) {
+    if (availableChains.includes('STARGAZE')) {
+      return 'STARGAZE';
+    } else if (availableChains.includes('STRIDE')) {
       return 'STRIDE';
-    } else if (availableChains.includes('BABYLON')) {
-      return 'BABYLON';
     }
     
     // Otherwise just use the first available chain

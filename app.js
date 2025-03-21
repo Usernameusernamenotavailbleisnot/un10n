@@ -4,6 +4,7 @@ import { setupWallets } from './core/blockchain/wallet.js';
 import DailyInteractionService from './core/quests/dailyInteraction.js';
 import TransferQuestService from './core/quests/transferQuest.js';
 import CrossChainQuestService from './core/quests/crossChainQuest.js';
+import FaucetService from './core/faucet/faucetService.js';
 import { runInteractiveUI } from './ui/index.js';
 
 /**
@@ -21,7 +22,8 @@ async function initializeApp() {
     const services = {
       daily: new DailyInteractionService(config),
       transfer: new TransferQuestService(config),
-      crossChain: new CrossChainQuestService(config)
+      crossChain: new CrossChainQuestService(config),
+      faucet: new FaucetService(config)
     };
     
     return { services, config };

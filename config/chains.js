@@ -36,7 +36,7 @@ const chains = {
     },
     STARGAZE: {
       chainId: "elgafar-1",
-      rpcEndpoint: "https://rpc.testcosmos.directory/stargazetestnet",
+      rpcEndpoint: "https://rpc.elgafar-1.stargaze-apis.com",
       prefix: "stars",
       denom: "ustars",
       gasPrice: { amount: "0.025", denom: "ustars" },
